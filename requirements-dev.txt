@@ -1,0 +1,28 @@
+# 本文件已废弃 — 开发依赖已迁移至 pyproject.toml [project.optional-dependencies] dev。
+# This file is deprecated — dev deps migrated to pyproject.toml [project.optional-dependencies] dev.
+# 使用 uv 安装 / Use uv to install:
+#
+#   uv sync --extra dev
+#   uv run ruff check src tests
+#   uv run mypy
+#   uv run pytest -v
+#
+# 旧 pip 方式（不推荐）/ Legacy pip (not recommended):
+#   python -m pip install -r requirements-dev.txt
+
+# 测试 / Tests
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# Lint / Format
+ruff>=0.4.0
+
+# 类型检查 / Static typing
+mypy>=1.10.0
+
+# 第三方库的类型 stubs / Third-party type stubs.
+# 现代库（fastapi、pydantic、httpx 等）已自带类型注解，不需要 stubs。
+# Modern libs (fastapi, pydantic, httpx) ship inline annotations — no stub needed.
+# 这里只列没有内置注解、且 stubs 单独发布的包。
+# Only list libs whose stubs are published separately.

@@ -1,0 +1,46 @@
+{
+  "title": "OpenBase Dashboard",
+  "description": "Grafana dashboard for OpenBase observability metrics",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Turns",
+      "type": "graph",
+      "targets": [
+        { "expr": "rate(openbase_turns_total[5m])" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Tool Calls",
+      "type": "graph",
+      "targets": [
+        { "expr": "rate(openbase_tool_calls_total[5m])" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tokens",
+      "type": "graph",
+      "targets": [
+        { "expr": "rate(openbase_tokens_total[5m])" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Cost (USD)",
+      "type": "graph",
+      "targets": [
+        { "expr": "rate(openbase_cost_usd_total[5m])" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "LLM Errors",
+      "type": "graph",
+      "targets": [
+        { "expr": "rate(openbase_llm_errors_total[5m])" }
+      ]
+    }
+  ]
+}
