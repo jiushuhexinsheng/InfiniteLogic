@@ -1,5 +1,5 @@
 """
-OpenBase 工具注册模块。
+InfiniteLogic 工具注册模块。
 
 导入所有工具模块以触发 @tool 装饰器注册到 TOOLS 单例。
 """

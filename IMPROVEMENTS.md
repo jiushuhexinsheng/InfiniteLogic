@@ -1,4 +1,4 @@
-# OpenBase — 改进方向 / Improvement Roadmap
+# InfiniteLogic — 改进方向 / Improvement Roadmap
 
 > 已完成 13 次迭代（v0.13），本文档列出下一阶段可做的事项。
 > 13 iterations shipped (v0.13). This doc lists what could come next.
@@ -34,7 +34,7 @@
 - **估算**：~150 行 YAML
 
 ### 2. Docker Compose 一键部署
-- **目标**：`docker compose up` 即可跑全栈（OpenBase + Prometheus + Grafana）
+- **目标**：`docker compose up` 即可跑全栈（InfiniteLogic + Prometheus + Grafana）
 - **做法**：
   - `Dockerfile`（Python 3.12-slim + uv 安装依赖）
   - `docker-compose.yml`（3 service：openbase / prometheus / grafana，含 provisioning volume）

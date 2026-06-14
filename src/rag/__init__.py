@@ -1,1 +1,1 @@
-# src/rag — OpenBase RAG 子系统包
+# src/rag — InfiniteLogic RAG 子系统包

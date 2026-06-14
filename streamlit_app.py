@@ -31,7 +31,7 @@ import uuid
 # Streamlit 主体 / Streamlit core.
 import streamlit as st
 
-# OpenBase 内部模块 / OpenBase internals.
+# InfiniteLogic 内部模块 / InfiniteLogic internals.
 from src.agent import run_turn
 from src.logging_setup import setup_logging
 from src.session import SessionStore
@@ -44,8 +44,8 @@ setup_logging()
 
 # 页面级配置：必须在任何其他 st 调用前 / Page config must be first.
 # page_icon 用 emoji 也行 / page_icon accepts emoji too.
-st.set_page_config(page_title="OpenBase", page_icon="🛠", layout="wide")
-st.title("OpenBase Agent")
+st.set_page_config(page_title="InfiniteLogic", page_icon="\U0001f6e0", layout="wide")
+st.title("InfiniteLogic Agent")
 
 # ──────────────────────────────────────────────────────────────────
 # 会话状态 / Session state

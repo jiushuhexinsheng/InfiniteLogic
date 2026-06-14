@@ -1,4 +1,4 @@
-# OpenBase Grafana 看板
+# InfiniteLogic Grafana 看板
 
 ## 导入步骤
 

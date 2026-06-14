@@ -1,6 +1,6 @@
 {
-  "title": "OpenBase Dashboard",
-  "description": "Grafana dashboard for OpenBase observability metrics",
+  "title": "InfiniteLogic Dashboard",
+  "description": "Grafana dashboard for InfiniteLogic observability metrics",
   "panels": [
     {
       "id": 1,

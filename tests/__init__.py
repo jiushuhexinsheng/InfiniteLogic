@@ -1,1 +1,1 @@
-# tests — OpenBase 测试包
+# tests — InfiniteLogic 测试包

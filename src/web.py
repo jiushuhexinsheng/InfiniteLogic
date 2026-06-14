@@ -43,7 +43,7 @@ from src.usage import USAGE
 # Init logging on import — sinks ready before uvicorn boots.
 setup_logging()
 # FastAPI 应用单例 / FastAPI app singleton.
-app = FastAPI(title="OpenBase Web UI")
+app = FastAPI(title="InfiniteLogic Web UI")
 
 # SessionStore 单例：所有请求共享一个 aiosqlite 连接。
 # Global SessionStore: one shared aiosqlite connection across requests.
@@ -82,7 +82,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>OpenBase</title>
+<title>InfiniteLogic</title>
 <style>
 * { box-sizing: border-box; }
 body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }

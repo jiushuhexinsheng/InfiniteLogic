@@ -200,7 +200,7 @@ python ingest.py --clear            # 删除整个索引重建
 
 检索流程：
 1. FastEmbed 编码 query
-2. **并行召回**：
+2. **召回**（当前串行，可改为并行）：
    - Qdrant 余弦相似度 → `RAG_TOP_K_RETRIEVAL` 条
    - BM25（jieba 分词）→ `RAG_BM25_TOP_K` 条
 3. RRF 融合两路排名
@@ -222,6 +222,9 @@ InfiniteLogic/
 ├── uv.lock               # 锁定所有依赖精确版本（不可手动编辑）
 ├── requirements.txt      # 已废弃 → 迁移至 pyproject.toml
 ├── requirements-dev.txt  # 已废弃 → 迁移至 pyproject.toml
+├── README.md             # 快速开始与使用指南
+├── WIKI.md               # 技术文档（架构/模块/扩展指南）
+├── IMPROVEMENTS.md       # 25 项后续改进方向
 ├── .env.example          # 配置模板
 ├── .gitignore
 ├── docs/                 # 待入库文档目录
@@ -295,25 +298,3 @@ streamlit_app.py          # Streamlit UI 入口
 | 历史无限增长 | `_trim_history` 保留 system + 最近 N 条 |
 | 工具异常崩溃 | `TOOLS.acall` 统一捕获异常转字符串 |
 | Qdrant 文件锁 | `reset_client()` 显式关闭后再删持久化目录 |
-
-## 与 LangChain 版本对比
-
-| 维度 | LangChain 版 | InfiniteLogic |
-|------|--------------|---------------|
-| 主框架依赖 | langchain + langgraph + langchain-openai + langchain-chroma 等 ~10 个 | 0 个 |
-| DeepSeek 思考模式 | 需要 60 行 monkey patch | 原生直通 |
-| Document 模型 | LangChain `Document` | 30 行自实现 |
-| 文本切分 | `RecursiveCharacterTextSplitter` | 80 行自实现 |
-| 工具 schema | `@tool` 装饰器生成 | 自实现 `@tool` + Pydantic |
-| ReAct 循环 | `create_react_agent` | 50 行 `run_turn` |
-| 会话持久化 | `AsyncSqliteSaver` | 100 行 `SessionStore` |
-| 总 Python 代码量 | ~700 行 + 大量框架代码 | ~1300 行（含详细中英注释） |
-| 启动时间 | ~3-4 秒 | ~1 秒 |
-| pip install 包数 | ~30 个 | ~19 个 |
-
-## 后续可扩展
-
-- 工具沙箱独立进程（Docker / Firejail）
-- 多模态 RAG（图片 / 音频）
-- 增量索引（watch docs 目录自动入库）
-- 插件化工具注册（AI 自动生成工具并热加载）

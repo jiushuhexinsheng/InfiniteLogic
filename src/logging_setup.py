@@ -5,8 +5,8 @@
 Uses loguru: single-line config, structured fields, level-based routing.
 
 写入文件 / Files:
-    logs/openbase.log         INFO+（全量轮转）
-    logs/openbase.error.log   ERROR+（异常专用，含 traceback）
+    logs/infinitelogic.log         INFO+（全量轮转）
+    logs/infinitelogic.error.log   ERROR+（异常专用，含 traceback）
 
 CLI 默认不打日志到 stderr，避免与 rich 输出抢屏。
 By default no stderr output to avoid mixing with rich console.
@@ -62,7 +62,7 @@ def setup_logging() -> None:
 
     # 主日志文件：按大小轮转 / Main log file with size rotation.
     logger.add(
-        log_dir / "openbase.log",
+        log_dir / "infinitelogic.log",
         level=settings.log_level,
         rotation="10 MB",        # 单文件超过 10MB → 轮转 / Rotate at 10MB
         retention=5,             # 最多保留 5 份 / Keep 5 rotations
@@ -73,7 +73,7 @@ def setup_logging() -> None:
     # 错误专用 sink：仅 ERROR+，附 traceback 便于排查。
     # Error-only sink with traceback for debugging.
     logger.add(
-        log_dir / "openbase.error.log",
+        log_dir / "infinitelogic.error.log",
         level="ERROR",
         rotation="10 MB",
         retention=5,

@@ -13,6 +13,9 @@ env/
 # 环境变量
 .env
 
+# 辅助文档（不提交）
+EXTRA.md
+
 # IDE
 .vscode/
 .idea/
@@ -21,7 +24,6 @@ env/
 
 # 运行时数据
 sessions.db
-faiss_db/
 qdrant_db/
 workspace/
 logs/

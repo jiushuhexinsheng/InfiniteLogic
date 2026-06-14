@@ -1,1 +1,1 @@
-# src — OpenBase 核心模块包
+# src — InfiniteLogic 核心模块包

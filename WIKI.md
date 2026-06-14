@@ -1,4 +1,4 @@
-# OpenBase — Wiki
+# InfiniteLogic — Wiki
 
 零框架 ReAct Agent 技术文档。**纯 httpx + Qdrant + FastEmbed**，无 LangChain / LangGraph / OpenAI SDK。
 
@@ -521,18 +521,18 @@ SHOW_REASONING=true
 
 ### 与 LangChain 版的差异
 
-| 维度 | LangChain (ai/) | OpenBase |
+| 维度 | LangChain (ai/) | InfiniteLogic |
 |------|-----------------|----------|
 | reasoning_content 提取 | 需 monkey patch 三处 converter | 直接读 JSON 字段 |
 | round-trip 回传 | 框架内部丢弃，需 patch 复原 | dict 原样塞回 messages list |
 | 协议字段位置 | `extra_body.thinking` | body 顶层 `thinking` |
 
-OpenBase 的 `llm.py` 直接处理，**60 行 monkey patch 不复存在**。
+InfiniteLogic 的 `llm.py` 直接处理，**60 行 monkey patch 不复存在**。
 
 ### 行为
 
 - `reasoning_content` 与 `content` 完全分离
-- 工具调用轮次中 assistant 消息必须带回 `reasoning_content`，OpenBase 通过 `additional_kwargs` 透传
+- 工具调用轮次中 assistant 消息必须带回 `reasoning_content`，InfiniteLogic 通过 `additional_kwargs` 透传
 - temperature 在 thinking 模式下被忽略，设了不报错
 
 ---
@@ -776,7 +776,7 @@ client = QdrantClient(
 
 **Q: DeepSeek 思考模式工具调用报 400**
 
-不应该再发生（OpenBase 不依赖框架，原生支持）。若发生：
+不应该再发生（InfiniteLogic 不依赖框架，原生支持）。若发生：
 - 确认 `LLM_BASE_URL` 是 DeepSeek 而非别的厂商
 - 确认 `LLM_THINKING_ENABLED=true` 仅对 V4 模型开启
 

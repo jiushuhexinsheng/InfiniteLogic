@@ -61,7 +61,7 @@ def _welcome() -> None:
         hint = f"\n[dim]Thinking: {settings.llm_reasoning_effort}[/dim]"
     console.print(
         Panel(
-            "[bold cyan]OpenBase Agent[/bold cyan]\n" + _HELP_TEXT + hint,
+            "[bold cyan]InfiniteLogic Agent[/bold cyan]\n" + _HELP_TEXT + hint,
             border_style="cyan",
         )
     )

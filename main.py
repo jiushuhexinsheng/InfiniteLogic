@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenBase 程序入口 / OpenBase entry point.
+InfiniteLogic 程序入口 / InfiniteLogic entry point.
 
 启动流程 / Bootstrap:
     1. 读 .env → Settings 单例 / Load .env into Settings.
@@ -59,7 +59,7 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         # 初始化异常（缺 API key、模型连接失败等）→ stderr + 退出码 1。
         # Init failures → stderr + exit code 1.
-        print(f"Failed to start OpenBase: {exc}", file=sys.stderr)
+        print(f"Failed to start InfiniteLogic: {exc}", file=sys.stderr)
         print("Check your .env file and ensure LLM_API_KEY is set.", file=sys.stderr)
         sys.exit(1)
 
