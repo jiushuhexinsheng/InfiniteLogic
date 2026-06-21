@@ -30,15 +30,16 @@ from __future__ import annotations
 
 # 标准库 / Stdlib.
 import json
+
 # pickle: 用于持久化 BM25Okapi（含 numpy 数组）。
 # Used to persist BM25Okapi (which contains numpy arrays).
 import pickle
 from pathlib import Path
-from typing import Optional
 
 # jieba: 中文分词器；cut_for_search 模式针对搜索优化，切粒度更细。
 # jieba: CJK tokenizer; cut_for_search yields finer tokens for search.
 import jieba
+
 # rank_bm25.BM25Okapi: 最经典的 BM25 实现 / Classic BM25 implementation.
 from rank_bm25 import BM25Okapi
 
@@ -108,7 +109,7 @@ class BM25Index:
     @classmethod
     def from_documents_with_sha1(
         cls, docs: list[Document], sha1: str
-    ) -> "BM25Index":
+    ) -> BM25Index:
         """从单个文件的 chunk 列表新建索引 / Build from one file's chunks."""
         if not docs:
             raise ValueError("Cannot build BM25Index from empty documents.")
@@ -221,7 +222,7 @@ class BM25Index:
         )
 
     @classmethod
-    def load(cls, dir_path: Path) -> Optional["BM25Index"]:
+    def load(cls, dir_path: Path) -> BM25Index | None:
         """
         从磁盘加载；JSON 不存在则返回 None（视为未建索引）。
         Load from disk; return None if JSON missing.
@@ -241,6 +242,6 @@ class BM25Index:
         return cls(docs=docs, shas=shas)
 
 
-def load_bm25_index() -> Optional[BM25Index]:
+def load_bm25_index() -> BM25Index | None:
     """便捷加载 / Convenience loader."""
     return BM25Index.load(Path(settings.rag_persist_dir))

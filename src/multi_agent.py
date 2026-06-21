@@ -31,81 +31,18 @@ Does not depend on SessionStore — one-shot, no intermediate persistence.
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from src.config import settings
 from src.llm import stream_chat
 from src.logging_setup import logger
+from src.prompts.multi_agent import (
+    PLANNER_PROMPT,
+    RESEARCHER_PROMPT,
+    RESEARCHER_TOOLS,
+    WRITER_PROMPT,
+)
 from src.tools import TOOLS
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Planner system prompt
-# 把任务拆成 JSON 子任务列表；约束 2-5 项、输出 ONLY JSON。
-# Decompose task into JSON subtasks; constraint 2-5 items, ONLY JSON output.
-# ─────────────────────────────────────────────────────────────────────
-PLANNER_PROMPT = """You are a Planner. Decompose the user's task into a SHORT JSON list of subtasks.
-
-Output ONLY valid JSON like:
-[
-  {"id": 1, "task": "...", "rationale": "..."},
-  {"id": 2, "task": "...", "rationale": "..."}
-]
-
-Rules:
-- 2-5 subtasks max.
-- Each subtask must be answerable by a single search or computation.
-- No prose outside the JSON array.
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Researcher system prompt
-# 拿到子任务后调工具收集证据；最终输出 JSON 字典（id → finding）。
-# Use tools to gather facts; output JSON map (id → finding).
-# ─────────────────────────────────────────────────────────────────────
-RESEARCHER_PROMPT = """You are a Researcher. For each subtask, call the appropriate tools to gather facts.
-
-Available tools:
-- search_docs: Local knowledge base. Try FIRST.
-- web_search / web_search_results: Internet search.
-- calculator, get_current_datetime, read_file, list_directory.
-
-For each subtask, summarize the findings concisely (1-3 sentences + sources).
-Output a JSON object like:
-{
-  "1": "finding for subtask 1 ...",
-  "2": "finding for subtask 2 ..."
-}
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Writer system prompt
-# 拿到 plan + findings 后综合答案，引用来源。
-# Synthesize final answer with inline citations.
-# ─────────────────────────────────────────────────────────────────────
-WRITER_PROMPT = """You are a Writer. Synthesize a final answer for the user based on the plan and research findings.
-
-- Be concise and direct.
-- Cite source filenames or URLs inline when relevant.
-- If findings are insufficient, say so honestly.
-"""
-
-
-# Researcher 允许使用的工具白名单。
-# Per-role tool whitelist for Researcher.
-# 不给 write_file / run_python_file 这类有副作用工具。
-# No side-effect tools (write_file / run_python_file) here.
-_RESEARCHER_TOOLS = {
-    "search_docs",
-    "web_search",
-    "web_search_results",
-    "calculator",
-    "get_current_datetime",
-    "read_file",
-    "list_directory",
-}
 
 
 async def _llm_simple(
@@ -129,7 +66,8 @@ async def _llm_simple(
 
 
 def _filtered_tool_schemas(allowed: set[str]) -> list[dict[str, Any]]:
-    """从全局 TOOLS 注册中心过滤出白名单工具的 schema。"""
+    """从全局 TOOLS 注册中心过滤出白名单工具的 schema。
+    Filter tool schemas from the global TOOLS registry by whitelist."""
     return [s for s in TOOLS.schemas() if s["function"]["name"] in allowed]
 
 
@@ -182,7 +120,7 @@ async def _researcher(plan: list[dict[str, Any]]) -> dict[str, Any]:
         {"role": "system", "content": RESEARCHER_PROMPT},
         {"role": "user", "content": f"Subtasks:\n{plan_str}\n\nGather findings and return the JSON object."},
     ]
-    tools = _filtered_tool_schemas(_RESEARCHER_TOOLS)
+    tools = _filtered_tool_schemas(RESEARCHER_TOOLS)
 
     for round_ in range(3):
         msg = await _llm_simple(messages, tools=tools)

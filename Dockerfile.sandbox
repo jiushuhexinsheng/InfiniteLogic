@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+# 非 root 用户 / Non-root user for defense-in-depth.
+RUN useradd -m -s /bin/false runner
+
+# 最小依赖：仅 stdlib + 常用纯 Python 包。
+# Minimal deps: stdlib only; add common pure-Python packages as needed.
+# RUN pip install --no-cache-dir requests numpy pandas
+
+USER runner
+WORKDIR /sandbox
+
+# 默认入口：跑传进来的脚本（--rm 自动清理容器）。
+# Default entry: run the mounted script (--rm cleans up the container).
+ENTRYPOINT ["python"]

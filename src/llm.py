@@ -33,12 +33,13 @@ from __future__ import annotations
 # json: 标准库，用来反序列化 SSE 每行的 data payload。
 # Standard library JSON used to decode each SSE line's data payload.
 import json
+from collections.abc import AsyncIterator
 
 # AsyncIterator: 类型注解；告诉调用者本函数是 async generator。
 # Type hint declaring this function as an async generator.
 # Optional: 等价于 X | None；保留 Optional 以兼顾老风格阅读。
 # Alias for X | None; kept for readability.
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 # httpx: 现代异步 HTTP 客户端；支持 streaming + HTTP/2 + 连接池。
 # Modern async HTTP client; streaming + HTTP/2 + connection pool.
@@ -55,7 +56,7 @@ from src.usage import USAGE
 
 def _build_payload(
     messages: list[dict[str, Any]],
-    tools: Optional[list[dict[str, Any]]] = None,
+    tools: list[dict[str, Any]] | None = None,
     stream: bool = True,
     include_usage: bool = True,
 ) -> dict[str, Any]:
@@ -159,7 +160,9 @@ def _accumulate_tool_calls(
 
 async def stream_chat(
     messages: list[dict[str, Any]],
-    tools: Optional[list[dict[str, Any]]] = None,
+    tools: list[dict[str, Any]] | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     流式调用 LLM，逐 chunk yield 事件。
@@ -173,6 +176,11 @@ async def stream_chat(
             "reasoning_content": str | None,
             "tool_calls": list | None,
         }}
+
+    client 参数：可选共享 httpx.AsyncClient（复用连接池）。
+    不传则每次新建；传了则不负责关闭。
+    Optional shared AsyncClient for connection pooling.
+    Creates one if not provided; caller owns lifecycle if provided.
     """
     # URL = base_url + "/chat/completions"，去掉 base_url 尾部斜杠避免 //。
     # Strip trailing slash on base_url to avoid `//chat/completions`.
@@ -185,9 +193,14 @@ async def stream_chat(
     reasoning_buf: list[str] = []
     tool_calls_buf: dict[int, dict[str, Any]] = {}
 
-    # httpx.AsyncClient 是异步 HTTP 客户端的核心；async with 保证连接池释放。
-    # AsyncClient is the core async HTTP client; async-with ensures pool cleanup.
-    async with httpx.AsyncClient(timeout=settings.llm_request_timeout) as client:
+    # 有共享 client 直接用；没有就自己建（向后兼容）。
+    # Use shared client if provided; create one otherwise (backward compat).
+    _own_client: httpx.AsyncClient | None = None
+    if client is None:
+        _own_client = httpx.AsyncClient(timeout=settings.llm_request_timeout)
+        client = _own_client
+
+    try:
         # client.stream(...) 返回一个上下文管理器，进入后 resp 是流式响应。
         # client.stream() returns a context manager; resp inside is a streamed response.
         async with client.stream(
@@ -266,22 +279,28 @@ async def stream_chat(
                         "arguments": (tc_delta.get("function") or {}).get("arguments") or "",
                     }
 
-    # 流结束后组装完整 assistant message。
-    # After the stream ends, reassemble the full assistant message.
-    message: dict[str, Any] = {
-        "role": "assistant",
-        # 把所有 content 片段拼成一整段 / Join all content fragments.
-        "content": "".join(content_buf),
-    }
-    # 只有真有思考内容才写字段；空字符串会被下游误读。
-    # Only set if non-empty; downstream code checks presence.
-    if reasoning_buf:
-        message["reasoning_content"] = "".join(reasoning_buf)
-    # tool_calls 按 index 升序排列；OpenAI 协议要求保持顺序。
-    # Sort tool_calls by index; protocol requires preserved order.
-    if tool_calls_buf:
-        message["tool_calls"] = [tool_calls_buf[i] for i in sorted(tool_calls_buf)]
+        # 流结束后组装完整 assistant message。
+        # After the stream ends, reassemble the full assistant message.
+        message: dict[str, Any] = {
+            "role": "assistant",
+            # 把所有 content 片段拼成一整段 / Join all content fragments.
+            "content": "".join(content_buf),
+        }
+        # 只有真有思考内容才写字段；空字符串会被下游误读。
+        # Only set if non-empty; downstream code checks presence.
+        if reasoning_buf:
+            message["reasoning_content"] = "".join(reasoning_buf)
+        # tool_calls 按 index 升序排列；OpenAI 协议要求保持顺序。
+        # Sort tool_calls by index; protocol requires preserved order.
+        if tool_calls_buf:
+            message["tool_calls"] = [tool_calls_buf[i] for i in sorted(tool_calls_buf)]
 
-    # 终止事件：把完整 message 抛给上层，agent 据此决定下一步。
-    # Terminal event: the agent uses this complete message to decide next steps.
-    yield {"type": "done", "message": message}
+        # 终止事件：把完整 message 抛给上层，agent 据此决定下一步。
+        # Terminal event: the agent uses this complete message to decide next steps.
+        yield {"type": "done", "message": message}
+
+    finally:
+        # 如果自己建的 client，关闭它；共享的 client 由调用方管理。
+        # Close self-owned client; shared clients are managed by the caller.
+        if _own_client is not None:
+            await _own_client.aclose()

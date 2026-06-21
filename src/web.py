@@ -25,17 +25,23 @@ from pathlib import Path
 # FastAPI 是基于 Starlette + Pydantic 的 ASGI 框架；高性能、类型友好。
 # FastAPI is Starlette + Pydantic; high-perf, typed.
 from fastapi import FastAPI, Response
+
 # 三种响应类：HTML 文本、流式、JSON / Three response classes.
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
 # Prometheus 文本格式生成器 + Content-Type 常量。
 # Prometheus exposition format generator + Content-Type constant.
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
 # Pydantic 用作请求体校验 / Pydantic for request body validation.
 from pydantic import BaseModel
 
 from src.agent import run_turn
+from src.auth import AuthMiddleware
 from src.config import settings
 from src.logging_setup import setup_logging
+from src.rag.health import rag_health_check
+from src.rag.watcher import get_rag_watcher
 from src.session import SessionStore
 from src.usage import USAGE
 
@@ -44,6 +50,9 @@ from src.usage import USAGE
 setup_logging()
 # FastAPI 应用单例 / FastAPI app singleton.
 app = FastAPI(title="InfiniteLogic Web UI")
+
+# 鉴权 + 限流中间件 / Auth + rate-limit middleware.
+app.add_middleware(AuthMiddleware)
 
 # SessionStore 单例：所有请求共享一个 aiosqlite 连接。
 # Global SessionStore: one shared aiosqlite connection across requests.
@@ -55,12 +64,14 @@ async def _startup() -> None:
     """
     应用启动钩子 / App startup hook.
 
-    准备 workspace 目录 + 打开 SessionStore。
-    Prepare workspace dir and open SessionStore.
+    准备 workspace 目录 + 打开 SessionStore + 启动 RAG watcher。
+    Prepare workspace dir, open SessionStore, start RAG watcher.
     """
     global _store
     Path(settings.workspace_dir).mkdir(parents=True, exist_ok=True)
     _store = await SessionStore.open()
+    # 启动 RAG 文档监听（如启用）/ Start RAG file watcher if enabled.
+    await get_rag_watcher().start()
 
 
 @app.on_event("shutdown")
@@ -68,9 +79,10 @@ async def _shutdown() -> None:
     """
     应用关闭钩子 / App shutdown hook.
 
-    优雅关闭 SessionStore；防止 SQLite 文件锁残留。
-    Gracefully close SessionStore to avoid stale SQLite locks.
+    优雅关闭 SessionStore + RAG watcher；防止资源泄漏。
+    Gracefully close SessionStore + RAG watcher.
     """
+    await get_rag_watcher().stop()
     if _store is not None:
         await _store.close()
 
@@ -302,6 +314,18 @@ async def metrics() -> Response:
     generate_latest() serializes all registered metrics to the text format.
     """
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/rag/health")
+async def rag_health() -> JSONResponse:
+    """
+    RAG 知识库健康检查 / RAG knowledge base health check.
+
+    返回 collection 状态、chunk 数、错误信息。
+    Returns collection status, chunk count, errors.
+    """
+    health = await rag_health_check()
+    return JSONResponse(health)
 
 
 # ─────────────────────────────────────────────────────────────────

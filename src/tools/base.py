@@ -26,10 +26,13 @@ from __future__ import annotations
 
 # asyncio: 检测协程 + to_thread / asyncio: detect coroutines + run in thread.
 import asyncio
+
 # inspect: 反射函数签名 / inspect: reflect function signature.
 import inspect
+from collections.abc import Callable
+
 # typing: 类型注解工具 / Typing utilities.
-from typing import Any, Callable, get_type_hints
+from typing import Any, get_type_hints
 
 # Callable 类型别名：所有工具都形如 (...) -> Any → str。
 # Type alias for tool callables: any signature returning Any (coerced to str).

@@ -8,8 +8,6 @@ pytest 配置。
 import os
 import sys
 
-import pytest
-
 # 确保 src 在 sys.path 中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

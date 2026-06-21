@@ -22,10 +22,10 @@ attribute access are forbidden.
 # 标准库 / Stdlib only.
 import ast
 import operator
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.tools.base import tool
-
 
 # ─────────────────────────────────────────────────────────────────────
 # AST 节点 → 实际操作函数 的映射。

@@ -16,9 +16,11 @@ RAG 检索工具 / RAG retrieval tool.
     the heavy vector index).
 """
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
 from src.config import settings
+from src.metrics import RAG_QUERIES_TOTAL
+
 # 引入 vectorstore 模块（不是 from import）便于热切换 / mocking。
 # Import as a module to ease hot-swap and mocking.
 from src.rag import vectorstore as vs
@@ -45,7 +47,7 @@ def _vs_ready() -> bool:
 
 
 @lru_cache(maxsize=1)
-def _get_bm25() -> Optional[BM25Index]:
+def _get_bm25() -> BM25Index | None:
     """
     BM25 索引懒加载缓存 / BM25 index cache.
 
@@ -140,6 +142,7 @@ def search_docs(query: str) -> str:
     """Search the local knowledge base."""
     # 索引不存在则直接提示 / Bail out early if no index.
     if not _vs_ready():
+        RAG_QUERIES_TOTAL.labels(status="empty").inc()
         return "Knowledge base is empty. Run `python ingest.py` to ingest documents first."
 
     # ----- 1. 多路召回 / Multi-source recall -----
@@ -159,6 +162,7 @@ def search_docs(query: str) -> str:
     # 两路都空说明知识库里真没相关内容。
     # Both empty → no relevant docs at all.
     if not vector_hits and not bm25_hits:
+        RAG_QUERIES_TOTAL.labels(status="empty").inc()
         return "No relevant documents found in the knowledge base."
 
     # ----- 2. RRF 融合 / Fuse rankings -----
@@ -194,4 +198,5 @@ def search_docs(query: str) -> str:
         page = doc.metadata.get("page", "")
         loc = f"{source}" + (f" (p.{page})" if page else "")
         parts.append(f"[{i}] {loc}\n{doc.page_content.strip()}")
+    RAG_QUERIES_TOTAL.labels(status="hit").inc()
     return "\n\n".join(parts)

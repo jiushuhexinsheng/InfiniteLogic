@@ -20,8 +20,7 @@ Accumulates `usage` from LLM responses; estimates cost using a price book.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
+from dataclasses import dataclass
 
 # 价目表（每 1K token 的 USD）。
 # Pricing table: USD per 1K tokens (input, output).

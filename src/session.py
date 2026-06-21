@@ -18,11 +18,12 @@ Stores (thread_id, message) tuples in SQLite for cross-process recovery.
 Each message stored verbatim as JSON: role, content, tool_calls,
 tool_call_id, reasoning_content.
 
-为什么 SQLite 而非 Redis / Why SQLite over Redis:
-    - 零运维（单文件）/ Zero ops (single file)
-    - aiosqlite 完全异步 / Fully async via aiosqlite
-    - 中小规模够用；大规模换 Postgres
-      Good enough for small/medium; switch to Postgres at scale
+生产化改进 / Production improvements (P1):
+    - WAL 模式：并发读不阻塞写 / WAL: concurrent reads don't block writes
+    - 分页加载：避免长会话内存爆炸 / Paginated load for long sessions
+    - 批量提交：每 turn 一次 commit / Batch commit per turn
+    - 会话 TTL：自动清理过期会话 / Auto-expire stale sessions
+    - 按范围删除：支持历史压缩 / Range delete for history summarization
 """
 from __future__ import annotations
 
@@ -37,11 +38,13 @@ from typing import Any
 import aiosqlite
 
 from src.config import settings
-
+from src.logging_setup import logger
 
 # 建表 + 索引的 SQL；executescript 一次跑多条语句。
 # CREATE statements; executescript runs multiple at once.
+# WAL 模式通过 PRAGMA journal_mode=WAL 启用。
 _INIT_SQL = """
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id  TEXT    NOT NULL,
@@ -75,15 +78,15 @@ class SessionStore:
         self._conn = conn
 
     @classmethod
-    async def open(cls) -> "SessionStore":
-        """打开 SQLite 连接 + 建表 / Open + init schema."""
+    async def open(cls) -> SessionStore:
+        """打开 SQLite 连接 + 建表 + WAL / Open + init schema + WAL."""
         db_path = Path(settings.session_db_path)
         # 父目录可能不存在，比如默认 ./sessions.db 在仓根。
         # Parent dir may not exist; create as needed.
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(str(db_path))
-        # executescript 跑 CREATE TABLE + CREATE INDEX 两条。
-        # executescript runs CREATE TABLE + CREATE INDEX in one shot.
+        # executescript 跑 PRAGMA WAL + CREATE TABLE + CREATE INDEX。
+        # executescript runs WAL pragma + schema DDL in one shot.
         await conn.executescript(_INIT_SQL)
         await conn.commit()
         return cls(conn)
@@ -95,18 +98,79 @@ class SessionStore:
     # ──────────────────────────────────────────────────────
     # 读 / Read
     # ──────────────────────────────────────────────────────
-    async def load_messages(self, thread_id: str) -> list[dict[str, Any]]:
-        """加载某会话全部消息（按顺序）/ Load all messages of a thread in order."""
-        # 用参数化查询（?）防 SQL 注入。
-        # Parameterized query (?) prevents SQL injection.
+    async def load_messages(
+        self,
+        thread_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        加载会话消息（支持分页）/ Load thread messages with optional pagination.
+
+        offset / limit 为 0 / None 时加载全部（向后兼容）。
+        offset=0, limit=None loads all (backward compatible).
+        """
+        if limit:
+            async with self._conn.execute(
+                "SELECT payload FROM messages WHERE thread_id = ? "
+                "ORDER BY idx ASC LIMIT ? OFFSET ?",
+                (thread_id, limit, offset),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with self._conn.execute(
+                "SELECT payload FROM messages WHERE thread_id = ? ORDER BY idx ASC",
+                (thread_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    async def load_messages_paginated(
+        self,
+        thread_id: str,
+        page: int = 0,
+        page_size: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        按页加载消息 / Load messages by page number.
+
+        page=0 是最新一页（倒数），page=1 是前一页，以此类推。
+        page=0 is the most recent page, page=1 the previous, etc.
+
+        用于长会话中只加载最近的消息，避免内存爆炸。
+        Use for long sessions to avoid loading all messages into memory.
+        """
+        size = page_size or settings.session_message_page_size
+        # 先拿到该 thread 总消息数 / Get total count first.
         async with self._conn.execute(
-            "SELECT payload FROM messages WHERE thread_id = ? ORDER BY idx ASC",
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
             (thread_id,),
         ) as cur:
-            rows = await cur.fetchall()
-        # rows 是 [(payload,), ...]；用 r[0] 拿字段 0，json.loads 反序列化。
-        # rows is [(payload,), ...]; r[0] is the payload, decode JSON.
-        return [json.loads(r[0]) for r in rows]
+            row = await cur.fetchone()
+            total = row[0] if row else 0
+
+        if total == 0:
+            return []
+
+        # 从后往前分页 / Paginate from the end.
+        # page=0 → 最后 size 条；page=1 → 倒数 size*2 到 size 条。
+        offset = max(0, total - (page + 1) * size)
+        limit = size
+        if page == 0:
+            # 最新页可能不足一页 / Last page may be partial.
+            limit = total - offset
+
+        return await self.load_messages(thread_id, offset=offset, limit=limit)
+
+    async def count_messages(self, thread_id: str) -> int:
+        """获取会话消息总数 / Get message count for a thread."""
+        async with self._conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
+            (thread_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
     async def _next_index(self, thread_id: str) -> int:
         """
@@ -135,8 +199,6 @@ class SessionStore:
             "INSERT INTO messages (thread_id, idx, payload, created_at) VALUES (?, ?, ?, ?)",
             (thread_id, idx, payload, time.time()),
         )
-        # 每次 append 立即 commit，保证 crash 后不丢消息。
-        # Commit per append; ensures durability across crashes.
         await self._conn.commit()
 
     async def append_many(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
@@ -158,9 +220,77 @@ class SessionStore:
         )
         await self._conn.commit()
 
+    # ──────────────────────────────────────────────────────
+    # 删除 / Delete
+    # ──────────────────────────────────────────────────────
     async def clear(self, thread_id: str) -> None:
         """删除某会话 / Drop a thread's history."""
         await self._conn.execute(
             "DELETE FROM messages WHERE thread_id = ?", (thread_id,)
         )
         await self._conn.commit()
+
+    async def delete_old_messages(
+        self, thread_id: str, keep_recent: int
+    ) -> int:
+        """
+        删除旧消息，仅保留最近 N 条（按 idx 降序）。
+        Delete old messages, keeping only the most recent N by idx.
+
+        返回删除的条数 / Returns number of deleted messages.
+
+        用于历史压缩：LLM 生成摘要后删除旧消息。
+        Used with history summarization: delete old msgs after summarization.
+        """
+        # 先找到保留的起始 idx / Find the cutoff idx.
+        async with self._conn.execute(
+            "SELECT idx FROM messages WHERE thread_id = ? ORDER BY idx DESC LIMIT 1 OFFSET ?",
+            (thread_id, keep_recent - 1),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return 0  # 不足 keep_recent 条，不删 / Less than keep_recent, skip.
+
+        cutoff = row[0]
+        async with self._conn.execute(
+            "DELETE FROM messages WHERE thread_id = ? AND idx < ?",
+            (thread_id, cutoff),
+        ) as cur:
+            deleted = cur.rowcount
+        await self._conn.commit()
+        return deleted
+
+    async def cleanup_expired(self) -> int:
+        """
+        清理过期会话 / Clean up expired sessions.
+
+        TTL 由 session_ttl_days 控制；0 表示永不过期。
+        TTL controlled by session_ttl_days; 0 = never expire.
+
+        返回清理的会话数 / Returns number of threads cleaned.
+        """
+        ttl_days = settings.session_ttl_days
+        if ttl_days <= 0:
+            return 0
+
+        cutoff = time.time() - (ttl_days * 86400)
+        # 找到最后活动时间早于 cutoff 的 thread_id。
+        # Find threads whose last activity is before cutoff.
+        async with self._conn.execute(
+            "SELECT thread_id FROM messages GROUP BY thread_id "
+            "HAVING MAX(created_at) < ?",
+            (cutoff,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        expired = [r[0] for r in rows]
+        if not expired:
+            return 0
+
+        for tid in expired:
+            await self._conn.execute(
+                "DELETE FROM messages WHERE thread_id = ?", (tid,)
+            )
+        await self._conn.commit()
+        logger.info("Session TTL: cleaned {} expired threads", len(expired))
+        return len(expired)

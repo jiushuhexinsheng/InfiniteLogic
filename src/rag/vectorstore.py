@@ -23,18 +23,21 @@ from __future__ import annotations
 # 标准库 uuid 用于生成稳定 point id。
 # Stdlib uuid; we use uuid5 for deterministic IDs.
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 # numpy: FastEmbed 返回 ndarray；Qdrant 消费 ndarray 或 list。
 # FastEmbed returns ndarray; Qdrant client accepts ndarray or list of floats.
 import numpy as np
+
 # FastEmbed: ONNX Runtime 上跑 embedding；无 PyTorch 重依赖。
 # FastEmbed runs ONNX Runtime; avoids the heavy PyTorch dependency.
 from fastembed import TextEmbedding
+
 # qdrant-client: 官方 Python SDK；同时支持本地 embedded 和远端服务。
 # Official Python SDK; works both embedded and remote.
 from qdrant_client import QdrantClient
+
 # qm 是 models 模块的别名，含 PointStruct / Filter / FieldCondition 等。
 # qm aliases the `models` module: PointStruct / Filter / FieldCondition / ...
 from qdrant_client.http import models as qm

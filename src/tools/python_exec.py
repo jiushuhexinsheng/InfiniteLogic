@@ -9,23 +9,25 @@ Python 执行工具 / Python execution tools.
     - 仅限 workspace 路径 / Workspace-only
     - 30s 默认超时，硬上限 120s / 30s default timeout, 120s hard cap
     - 输出截断 4000 字 / Output truncated to 4000 chars
-    - subprocess 独立进程，crash 不影响主 Agent
-      subprocess isolates crashes from the main agent process
+    - 沙箱模式可选：subprocess / docker / disabled
+      Sandbox mode: subprocess / docker / disabled
 
-⚠️ subprocess 仅隔离崩溃；不限网络 / 不限导入；要更严需 Docker/Firejail/seccomp。
-⚠️ subprocess isolates crashes only; no network/import blocking.
+⚠️ subprocess 仅隔离崩溃；不限网络 / 不限导入；生产用 docker 模式。
+⚠️ subprocess isolates crashes only; use docker mode for production.
 """
 # 标准库 / Stdlib.
-import shutil       # 清理临时目录 / cleanup tmp dir
-import subprocess   # 子进程 / child process
-import sys          # sys.executable 拿当前 Python 解释器路径
-import uuid         # 临时文件名生成
+import shutil  # 清理临时目录 / cleanup tmp dir
+import uuid  # 临时文件名生成
 from pathlib import Path
 
 from src.config import settings
 from src.tools.base import tool
+
 # 复用 file_tools 的 _resolve 做沙箱校验 / Reuse sandbox check.
 from src.tools.file_tools import _resolve
+
+# 沙箱执行器 / Sandbox executor.
+from src.tools.sandbox import run_in_sandbox
 
 # 单个 stream 最大字符 / Per-stream char cap.
 _MAX_OUTPUT_CHARS = 4000
@@ -45,44 +47,31 @@ def _truncate(text: str) -> str:
     return text[:_MAX_OUTPUT_CHARS] + f"\n...(truncated {len(text) - _MAX_OUTPUT_CHARS} chars)"
 
 
-def _run(script: Path, cwd: Path, timeout: int) -> str:
+async def _run_sandbox(script: Path, cwd: Path, timeout: int) -> str:
     """
-    底层执行：subprocess.run + 输出格式化。
-    Core runner: subprocess + output formatting.
+    底层执行：通过 sandbox 模块运行脚本并格式化输出。
+    Core runner: delegates to sandbox module, formats output.
 
-    用 sys.executable 而非 "python"：
-        - 避免 PATH 找不到 / Avoid PATH lookup failures
-        - 保证子进程用与主程序相同的 Python 解释器
-          Ensures child uses the same Python interpreter as the parent.
+    改用 sandbox 模块后支持 docker 模式（网络隔离、资源限制）。
+    Now supports docker mode via sandbox module (network isolation, resource caps).
     """
-    try:
-        result = subprocess.run(
-            [sys.executable, str(script)],
-            cwd=str(cwd),                  # 工作目录 / cwd
-            capture_output=True,            # 抓 stdout / stderr
-            text=True,                      # 字符串模式（非 bytes）
-            timeout=timeout,                # 超时秒数
-            encoding="utf-8",               # 输出按 utf-8 解码
-            errors="replace",               # 异常字符替换 ? 避免抛 UnicodeDecodeError
-        )
-    except subprocess.TimeoutExpired:
-        # 超时单独处理：返回明确提示，不抛异常。
-        # Timeout handled explicitly; return a clear message.
-        return f"Timeout after {timeout}s."
+    result = await run_in_sandbox(script, cwd, timeout)
 
     # 拼装输出：stdout / stderr / exit code 三段。
-    # Compose output: stdout / stderr / exit code in three sections.
+    # Compose output: stdout / stderr / exit code.
     parts = []
+    if result.timed_out:
+        parts.append(f"Timeout after {timeout}s.")
     if result.stdout:
         parts.append(f"STDOUT:\n{_truncate(result.stdout)}")
     if result.stderr:
         parts.append(f"STDERR:\n{_truncate(result.stderr)}")
-    parts.append(f"Exit code: {result.returncode}")
+    parts.append(f"Exit code: {result.exit_code}")
     return "\n\n".join(parts)
 
 
 @tool("Execute a Python file inside the workspace. file_path is relative to workspace root.")
-def run_python_file(file_path: str, timeout_seconds: int = 30) -> str:
+async def run_python_file(file_path: str, timeout_seconds: int = 30) -> str:
     """Execute a Python file in the workspace and return its output."""
     # 沙箱校验：越界路径会抛 PermissionError → 转字符串返回。
     # Sandbox check: out-of-bounds paths raise → string return.
@@ -93,11 +82,11 @@ def run_python_file(file_path: str, timeout_seconds: int = 30) -> str:
     timeout = max(1, min(timeout_seconds, _TIMEOUT_HARD_CAP))
     # cwd 用脚本所在目录，让脚本能用相对路径访问同目录文件。
     # cwd = script dir, so relative-path file access works.
-    return _run(target, target.parent, timeout)
+    return await _run_sandbox(target, target.parent, timeout)
 
 
 @tool("Execute an ad-hoc Python code snippet. Creates a temp file under workspace, runs, deletes.")
-def exec_python_snippet(code: str, timeout_seconds: int = 30) -> str:
+async def exec_python_snippet(code: str, timeout_seconds: int = 30) -> str:
     """Execute an ad-hoc Python snippet."""
     base = Path(settings.workspace_dir).resolve()
     # 临时片段目录；首次执行时自动创建。
@@ -115,7 +104,7 @@ def exec_python_snippet(code: str, timeout_seconds: int = 30) -> str:
         script.write_text(code, encoding="utf-8")
         # 以 workspace 根目录为 cwd，方便 snippet 引用其他文件。
         # cwd = workspace root so the snippet can reference workspace files.
-        return _run(script, base, timeout)
+        return await _run_sandbox(script, base, timeout)
     finally:
         # finally 确保即使中途抛错也清理临时文件。
         # finally ensures cleanup even on exceptions.

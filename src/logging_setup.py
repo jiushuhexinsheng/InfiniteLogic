@@ -26,7 +26,6 @@ from loguru import logger
 
 from src.config import settings
 
-
 # 模块级哨兵防止重复初始化（多次 import / 重启场景）。
 # Module-level sentinel prevents double-init across re-imports.
 _INITIALIZED = False

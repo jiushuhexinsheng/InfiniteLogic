@@ -36,6 +36,7 @@ Prometheus 指标 / Prometheus metrics.
 from __future__ import annotations
 
 import time
+
 # 用 contextmanager 装饰器把"计时器"做成 with 上下文，调用方更优雅。
 # contextmanager turns a generator into a `with`-usable timer.
 from contextlib import contextmanager
@@ -96,6 +97,41 @@ TOOL_LATENCY = Histogram(
     "Tool call latency.",
     labelnames=("name",),
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+
+# TTFT: Time To First Token（用户感知的首字延迟）。
+# TTFT: time from request to first content token.
+TTFT_LATENCY = Histogram(
+    "openbase_ttft_seconds",
+    "Time to first content token.",
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+
+# LLM 内容拒绝计数（如安全过滤器触发）。
+# LLM content refusal counter (e.g., safety filter triggered).
+LLM_REFUSALS_TOTAL = Counter(
+    "openbase_llm_refusals_total",
+    "LLM content refusals (safety filter).",
+    labelnames=("model",),
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# RAG 指标 / RAG metrics
+# ─────────────────────────────────────────────────────────────────────
+RAG_QUERIES_TOTAL = Counter(
+    "openbase_rag_queries_total",
+    "Total RAG queries.",
+    labelnames=("status",),     # hit | empty
+)
+
+RAG_INGEST_ERRORS_TOTAL = Counter(
+    "openbase_rag_ingest_errors_total",
+    "RAG ingestion errors.",
+)
+
+RAG_CHUNKS_GAUGE = Counter(
+    "openbase_rag_chunks_total",
+    "Cumulative chunks written (use rate() for trends).",
 )
 
 

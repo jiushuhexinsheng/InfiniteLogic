@@ -29,16 +29,23 @@ Pure while loop driven; no LangChain / LangGraph required.
 from __future__ import annotations
 
 # 标准库 / Stdlib only.
+import asyncio
 import json
-from typing import Any, AsyncIterator
+import time
+from collections.abc import AsyncIterator
+from typing import Any
 
 # 配置单例：取 recursion_limit / max_history_messages。
 # Settings singleton: provides recursion_limit / max_history_messages.
 from src.config import settings
 
-# stream_chat: 流式 LLM 调用入口；返回 AsyncIterator[dict] 事件流。
-# stream_chat: streaming LLM entry point.
+# stream_chat: 底层流式调用；用于摘要压缩（一次性调用）。
+# stream_chat: low-level streaming call; used for summarization (one-shot).
 from src.llm import stream_chat
+
+# LlmClient: 带重试+熔断的高阶封装。
+# LlmClient: higher-level wrapper with retry + circuit breaker.
+from src.llm_client import CircuitBreakerOpenError, RetryExhaustedError, get_llm_client
 
 # loguru logger 单例 / loguru singleton logger.
 from src.logging_setup import logger
@@ -47,10 +54,20 @@ from src.logging_setup import logger
 from src.metrics import (
     LLM_ERRORS_TOTAL,
     TOOL_CALLS_TOTAL,
+    TTFT_LATENCY,
     TURNS_TOTAL,
     time_tool,
     time_turn,
 )
+
+# 提示词模块 / Prompts module.
+from src.prompts.agent import (
+    SUMMARIZE_SYSTEM,
+    SUMMARIZE_USER,
+    SUMMARY_PREFIX,
+    build_system_prompt,
+)
+from src.prompts.rules import SAFE_PARALLEL_TOOLS
 
 # 异步会话存储 / Async session store.
 from src.session import SessionStore
@@ -58,41 +75,8 @@ from src.session import SessionStore
 # 工具注册中心 / Tool registry.
 from src.tools import TOOLS
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 系统提示 / System prompt
-#
-# 这段文本会作为 messages[0] 注入到每次 LLM 调用，定义 Agent 的"角色描述"。
-# Prepended to every LLM call as messages[0]; defines the Agent's persona.
-#
-# 重点 / Key points:
-#   - 列出所有可用工具供 LLM 决策 / Enumerate tools so the LLM can plan
-#   - 显式约束行为（不要写包装脚本、不要重复调用同工具同参）
-#     Explicit behavioral constraints (no wrapper scripts, no repeat calls)
-# ─────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a helpful AI assistant with access to multiple tools.
-
-Available tools:
-- search_docs: Search the LOCAL knowledge base. Use this FIRST for domain-specific questions.
-- web_search / web_search_results: Search the internet for current information.
-- calculator: Evaluate a math expression.
-- get_current_datetime: Get current date/time in any timezone.
-- read_file / write_file / list_directory: Interact with files in the workspace.
-- run_python_file: Execute a Python file located in the workspace.
-- exec_python_snippet: Execute an ad-hoc Python code snippet.
-
-Guidelines:
-- Think step-by-step before acting.
-- Use tools when external data or computation is needed.
-- Be concise but complete.
-- If a tool fails, explain why and try an alternative approach.
-- To run existing Python code in the workspace, call run_python_file directly.
-  Do NOT write wrapper scripts that exec/import the target.
-- For ad-hoc Python (quick math, prototyping), call exec_python_snippet.
-  Do NOT create permanent files for one-off snippets.
-- Never call the same tool with identical arguments twice in a row without
-  new information; report the issue to the user instead.
-"""
+# 分布式追踪 / Distributed tracing.
+from src.tracing import trace_async_span
 
 
 def _trim_history(
@@ -143,6 +127,108 @@ def _trim_history(
     return system_msgs + tail
 
 
+async def _summarize_history(
+    history: list[dict[str, Any]],
+    session: SessionStore,
+    thread_id: str,
+) -> list[dict[str, Any]]:
+    """
+    压缩会话历史 / Summarize conversation history.
+
+    当历史消息超过 agent_summarize_threshold 时：
+    1. 取出最旧的部分（system 消息除外）
+    2. 调 LLM 生成一段摘要
+    3. 替换旧消息为摘要 system 消息
+    4. 从 SQLite 删除旧消息
+
+    When history exceeds agent_summarize_threshold:
+    1. Take oldest portion (excluding system msgs)
+    2. Call LLM to generate a summary
+    3. Replace old msgs with summary as system message
+    4. Delete old msgs from SQLite
+    """
+    threshold = settings.agent_summarize_threshold
+    keep = settings.agent_summarize_keep_recent
+
+    # 不足阈值不压缩 / Skip if below threshold.
+    if len(history) <= threshold:
+        return history
+
+    # 分离 system 消息与对话消息 / Split system vs conversation messages.
+    system_msgs: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for m in history:
+        if m.get("role") == "system" and not rest:
+            system_msgs.append(m)
+        else:
+            rest.append(m)
+
+    # 对话消息也不足阈值 / Conversation msgs also below threshold.
+    if len(rest) <= threshold:
+        return history
+
+    # 取最旧的 60% 对话消息作为压缩对象 / Take oldest 60% for compression.
+    compress_count = max(len(rest) - keep, int(len(rest) * 0.6))
+    to_compress = rest[:compress_count]
+    to_keep = rest[compress_count:]
+
+    # 拼成纯文本供 LLM 摘要 / Flatten for LLM summarization.
+    history_text_parts: list[str] = []
+    for m in to_compress:
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        if isinstance(content, str) and content:
+            history_text_parts.append(f"[{role}]: {content}")
+        # 包含 tool 调用信息 / Include tool call info.
+        tcs = m.get("tool_calls")
+        if tcs:
+            for tc in tcs:
+                history_text_parts.append(
+                    f"[tool_call]: {tc['function']['name']}({tc['function'].get('arguments','')})"
+                )
+
+    history_text = "\n".join(history_text_parts)
+    if not history_text.strip():
+        return system_msgs + to_keep
+
+    # 调 LLM 生成摘要（一次性，无工具，无流式）。
+    # One-shot LLM call for summarization (no tools, no streaming).
+    summary_prompt = [
+        {"role": "system", "content": SUMMARIZE_SYSTEM},
+        {"role": "user", "content": SUMMARIZE_USER.format(history_text=history_text)},
+    ]
+    try:
+        assistant_msg: dict[str, Any] | None = None
+        async for event in stream_chat(summary_prompt, tools=None):
+            if event["type"] == "done":
+                assistant_msg = event["message"]
+        summary_text = (assistant_msg or {}).get("content", "") if assistant_msg else ""
+    except Exception:
+        logger.exception("History summarization failed")
+        return history  # 失败不丢历史 / Don't lose history on failure.
+
+    if not summary_text.strip():
+        return system_msgs + to_keep
+
+    # 从 SQLite 删除旧消息 / Delete old msgs from SQLite.
+    try:
+        deleted = await session.delete_old_messages(thread_id, keep_recent=keep + 1)
+        logger.info(
+            "History summarized: {} msgs compressed, {} deleted from DB",
+            compress_count, deleted,
+        )
+    except Exception:
+        logger.exception("Failed to delete old messages after summarization")
+
+    # 构造新历史：system 消息 + 摘要 + 保留的最近消息。
+    # Rebuild: system msgs + summary + kept recent msgs.
+    summary_msg = {
+        "role": "system",
+        "content": SUMMARY_PREFIX.format(text=summary_text),
+    }
+    return system_msgs + [summary_msg] + to_keep
+
+
 async def run_turn(
     user_input: str,
     thread_id: str,
@@ -161,16 +247,20 @@ async def run_turn(
                     Conversation UUID used to fetch / store history
         session:    已打开的 SessionStore / Opened SessionStore instance
     """
-    # ── 1. 加载历史 + 注入系统提示 ──────────────────────────────
-    # 1. Load history + ensure system prompt is present.
+    # ── 1. 加载历史 + 注入系统提示 + 历史压缩 ────────────────
+    # 1. Load history + ensure system prompt + compress if needed.
     history = await session.load_messages(thread_id)
     # 首次或没有 system 的会话：在最前面补上。
     # First-time or missing system: prepend it.
     if not history or history[0].get("role") != "system":
-        history.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        history.insert(0, {"role": "system", "content": build_system_prompt(TOOLS.schemas())})
 
-    # 把本轮用户输入加入 history 并持久化（agent 崩了也不丢用户消息）。
-    # Append + persist the user msg (so it's never lost if agent crashes).
+    # 历史压缩：超阈值时 LLM 摘要 + 删除旧消息。
+    # History compression: summarize + delete when exceeding threshold.
+    history = await _summarize_history(history, session, thread_id)
+
+    # 把本轮用户输入加入 history 并立即持久化（crash 安全）。
+    # Append + immediately persist user msg (crash-safe).
     user_msg = {"role": "user", "content": user_input}
     history.append(user_msg)
     await session.append(thread_id, user_msg)
@@ -200,16 +290,24 @@ async def run_turn(
 
         try:
             assistant_message: dict[str, Any] | None = None
-            # async for 消费 stream_chat 产出的事件流。
-            # async for consumes the event stream from stream_chat.
-            async for event in stream_chat(trimmed, tools=TOOLS.schemas()):
+            # async for 消费 retry_stream_chat 产出的事件流。
+            # async for consumes the event stream from retry_stream_chat.
+            # Retry + circuit breaker are handled inside.
+            _ttft_start = time.monotonic()
+            _ttft_recorded = False
+            async for event in get_llm_client().retry_stream_chat(
+                trimmed, tools=TOOLS.schemas()
+            ):
                 etype = event["type"]
                 if etype == "reasoning_delta":
-                    # 思考内容片段直接转发给上层（CLI 决定是否显示）。
-                    # Forward reasoning fragment to caller.
+                    # 思考内容片段直接转发给上层。
                     yield {"type": "reasoning_delta", "text": event["text"]}
                 elif etype == "content_delta":
-                    # 最终回答片段 / Final answer fragment.
+                    # 最终回答片段 + TTFT 记录。
+                    # Final answer fragment + TTFT recording.
+                    if not _ttft_recorded:
+                        TTFT_LATENCY.observe(time.monotonic() - _ttft_start)
+                        _ttft_recorded = True
                     yield {"type": "content_delta", "text": event["text"]}
                 elif etype == "tool_call_delta":
                     # 不向 UI 输出 tool_call 流碎片（噪音太多，UI 等完整后展示）。
@@ -219,9 +317,32 @@ async def run_turn(
                     # 完整 assistant message；保留下来决定下一步。
                     # Full assistant message; decide next step from this.
                     assistant_message = event["message"]
+        except CircuitBreakerOpenError:
+            # 熔断器开启：快速失败，提示用户稍后重试。
+            # Circuit breaker open: fail fast, tell user to retry later.
+            logger.warning("Circuit breaker open at step {}", step)
+            yield {
+                "type": "error",
+                "message": (
+                    "Service temporarily unavailable. "
+                    "The LLM provider is experiencing issues. "
+                    f"Please retry in {settings.llm_circuit_breaker_cooldown}s."
+                ),
+            }
+            TURNS_TOTAL.labels(status="error").inc()
+            turn_timer.__exit__(None, None, None)
+            return
+        except RetryExhaustedError as exc:
+            # 重试耗尽：临时故障持续，给用户清晰信息。
+            # Retries exhausted: transient failure persisted. Give clear info.
+            logger.exception("LLM retries exhausted at step {}", step)
+            yield {"type": "error", "message": f"LLM call failed: {exc}"}
+            TURNS_TOTAL.labels(status="error").inc()
+            turn_timer.__exit__(None, None, None)
+            return
         except Exception as exc:  # noqa: BLE001
-            # stream_chat 抛出（网络断、4xx、5xx 等）→ 记日志 + 指标 + 优雅返回。
-            # stream_chat raised (network / 4xx / 5xx). Log + metric + return.
+            # 不可重试错误（4xx 认证/参数错等）→ 立即终止。
+            # Non-retryable errors (4xx auth/params) → terminate immediately.
             logger.exception("LLM call failed at step {}", step)
             LLM_ERRORS_TOTAL.labels(kind=type(exc).__name__).inc()
             yield {"type": "error", "message": f"LLM call failed: {exc}"}
@@ -237,10 +358,12 @@ async def run_turn(
             turn_timer.__exit__(None, None, None)
             return
 
-        # 把完整 assistant 消息加入 history 并写库（含可能的 reasoning + tool_calls）。
-        # Append + persist the assistant message (with reasoning + tool_calls).
+        # 把完整 assistant 消息加入 history 并持久化。
+        # Append + persist the assistant message.
         history.append(assistant_message)
-        await session.append(thread_id, assistant_message)
+        # 收集本轮需批量持久化的消息（assistant + tool msgs）。
+        # Collect messages for batch persist (assistant + tool msgs).
+        pending_db: list[dict[str, Any]] = [assistant_message]
 
         # 取出 tool_calls；空列表 == None 都视为"无工具调用"。
         # Extract tool_calls; treat empty / None as "no tool calls".
@@ -248,66 +371,123 @@ async def run_turn(
         if not tool_calls:
             # 终止条件：LLM 输出最终答案，未再请求工具。
             # Termination: LLM produced final answer, no further tools.
+            await session.append_many(thread_id, pending_db)
             terminal_status = "done"
             yield {"type": "done"}
             TURNS_TOTAL.labels(status=terminal_status).inc()
             turn_timer.__exit__(None, None, None)
             return
 
-        # ── 4. 顺序执行所有 tool_calls ────────────────────────
-        # 4. Execute every tool_call in order.
+        # ── 4. 工具执行（支持并行） ────────────────────────────
+        # 4. Tool execution (with parallel support).
         #
-        # 当前实现：串行。可改 asyncio.gather 并行（注意 file_write 等有副作用工具需互斥）。
-        # Currently sequential. Could be asyncio.gather'd, but side-effect
-        # tools (file_write, etc.) need mutual exclusion if parallelized.
+        # 无副作用工具可并行（asyncio.gather），有副作用工具保持串行。
+        # Side-effect-free tools run in parallel (asyncio.gather);
+        # side-effect tools stay sequential.
+
+        if settings.agent_parallel_tools:
+            # 分组 / Split into parallel vs sequential groups.
+            # 使用 prompts.rules 中定义的安全并行白名单。
+            # Use safe-parallel whitelist from prompts.rules.
+            safe_calls = [tc for tc in tool_calls if tc["function"]["name"] in SAFE_PARALLEL_TOOLS]
+            mutex_calls = [tc for tc in tool_calls if tc["function"]["name"] not in SAFE_PARALLEL_TOOLS]
+
+            # 第一步：并行执行安全工具 / Phase 1: parallel safe tools.
+            if safe_calls:
+                # 先 yield 全部 tool_start 事件（保持 UI 顺序）。
+                # Yield all tool_start events first (preserve UI order).
+                parsed_safe: list[tuple[dict, str, dict]] = []
+                for tc in safe_calls:
+                    name = tc["function"]["name"]
+                    raw_args = tc["function"]["arguments"] or "{}"
+                    try:
+                        args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        args = {}
+                    parsed_safe.append((tc, name, args))
+                    logger.info(
+                        "tool_call thread={} step={} name={} args={}",
+                        thread_id[:8], step, name, args,
+                    )
+                    yield {"type": "tool_start", "name": name, "args": args}
+
+                # asyncio.gather 并行执行 / Execute in parallel.
+                async def _exec_one(name: str, args: dict) -> tuple[str, str]:
+                    """执行单个工具并返回 (tool_status, result)。"""
+                    with time_tool(name):
+                        result = await TOOLS.acall(name, args)
+                    tool_status = "error" if result.startswith("Error") else "ok"
+                    return tool_status, result
+
+                parallel_results = await asyncio.gather(
+                    *[_exec_one(name, args) for _, name, args in parsed_safe],
+                    return_exceptions=True,
+                )
+
+                # 按原始顺序处理结果 / Process results in original order.
+                for (tc, name, _args), presult in zip(parsed_safe, parallel_results, strict=True):
+                    if isinstance(presult, Exception):
+                        tool_status = "error"
+                        result = f"Error in {name}: {presult}"
+                    else:
+                        tool_status, result = presult
+
+                    TOOL_CALLS_TOTAL.labels(name=name, status=tool_status).inc()
+                    logger.info(
+                        "tool_result thread={} name={} status={} output_len={}",
+                        thread_id[:8], name, tool_status, len(result),
+                    )
+                    yield {"type": "tool_end", "name": name, "output": result}
+
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    }
+                    history.append(tool_msg)
+                    pending_db.append(tool_msg)
+
+            # 第二步：串行执行有副作用工具 / Phase 2: sequential mutex tools.
+            tool_calls = mutex_calls
+
+        # ── 串行执行（有副作用工具 或 并行关闭时全部走这里）───
+        # Sequential execution (side-effect tools or when parallel is off).
         for tc in tool_calls:
             name = tc["function"]["name"]
-            # arguments 是 JSON 字符串；LLM 偶尔生成空串。
-            # arguments is a JSON string; LLM may produce "".
             raw_args = tc["function"]["arguments"] or "{}"
             try:
                 args = json.loads(raw_args)
             except json.JSONDecodeError:
-                # 解析失败用空 dict；工具内部会因缺参报错并被 safe_tool 转字符串。
-                # On parse failure: pass {} — tool will report missing param error.
                 args = {}
 
-            # 结构化日志：thread_id 截短 8 位便于关联前端显示。
-            # Structured log; truncate thread_id for readability.
             logger.info(
                 "tool_call thread={} step={} name={} args={}",
                 thread_id[:8], step, name, args,
             )
-            # 给 UI 一个明确的"工具开始"事件。
-            # Emit explicit "tool started" event for UI.
             yield {"type": "tool_start", "name": name, "args": args}
-            # time_tool 是同步 context manager，包同步代码即可。
-            # time_tool is a sync ctx manager; wraps the async call body.
-            with time_tool(name):
-                # acall 自动处理同步/异步函数 + 异常兜底转字符串。
-                # acall handles sync/async dispatch + exception → string.
-                result = await TOOLS.acall(name, args)
-            # 工具错误约定：返回串以 "Error" 开头视为失败。
-            # Tool error convention: result starting with "Error" → failure.
+            async with trace_async_span(f"tool.{name}") as tool_span:
+                if tool_span:
+                    tool_span.set_attribute("step", step)
+                with time_tool(name):
+                    result = await TOOLS.acall(name, args)
             tool_status = "error" if result.startswith("Error") else "ok"
             TOOL_CALLS_TOTAL.labels(name=name, status=tool_status).inc()
             logger.info(
                 "tool_result thread={} name={} status={} output_len={}",
                 thread_id[:8], name, tool_status, len(result),
             )
-            # UI 收到结果（含截断预览）/ UI gets result (with preview).
             yield {"type": "tool_end", "name": name, "output": result}
 
-            # 必须把 tool result 作为 role=tool 消息塞回 history，
-            # 用 tool_call_id 关联回 assistant 的 tool_call。
-            # Echo tool result back as a role=tool message, linked by id.
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
             }
             history.append(tool_msg)
-            await session.append(thread_id, tool_msg)
+            pending_db.append(tool_msg)
+
+        # 本轮所有消息批量持久化 / Batch persist all messages for this step.
+        await session.append_many(thread_id, pending_db)
 
         # 工具执行完，回到 for 顶端再次调用 LLM 决定下一步。
         # After all tools run, loop back to call LLM with updated context.

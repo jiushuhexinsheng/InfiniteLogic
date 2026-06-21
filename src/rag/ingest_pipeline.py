@@ -18,21 +18,22 @@ Changed files: delete by old sha1 then insert by new sha1 (in-place update).
 from __future__ import annotations
 
 # 标准库 / Stdlib.
-import hashlib                  # SHA1 哈希 / SHA1 hashing
-import json                     # manifest 序列化 / manifest serialization
-import shutil                   # rmtree（--clear 时删整个目录）/ rmtree for --clear
+import hashlib  # SHA1 哈希 / SHA1 hashing
+import json  # manifest 序列化 / manifest serialization
+import shutil  # rmtree（--clear 时删整个目录）/ rmtree for --clear
 from pathlib import Path
 from typing import Any
 
 from src.config import settings
-# 索引与文档抽象 / Index + document abstractions.
-from src.rag.bm25_index import BM25Index, load_bm25_index
-from src.rag.document import Document
-from src.rag.loader import collect_files, load_file
-from src.rag.splitter import split_documents
+
 # 用模块对象而不是 from import：方便测试时 monkeypatch。
 # Import as module to ease monkeypatching in tests.
 from src.rag import vectorstore as vs
+
+# 索引与文档抽象 / Index + document abstractions.
+from src.rag.bm25_index import BM25Index, load_bm25_index
+from src.rag.loader import collect_files, load_file
+from src.rag.splitter import split_documents
 
 MANIFEST_NAME = "manifest.json"
 

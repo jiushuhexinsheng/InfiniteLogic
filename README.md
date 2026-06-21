@@ -36,14 +36,45 @@ python main.py
 
 ## 功能特性
 
+### 核心引擎
 - **ReAct Agent 循环** — 纯 while 循环驱动，无图调度框架
 - **流式输出** — SSE 解析，token 级实时渲染（含 DeepSeek 思考流）
-- **RAG 知识库** — FastEmbed + Qdrant + BGE Reranker 两段检索
-- **SHA1 去重入库** — 防止重复 ingest 膨胀索引
-- **会话持久化** — aiosqlite 写 `sessions.db`，重启不丢
-- **历史自动裁剪** — 保留 system + 最近 N 条，不切断 tool_call 配对
+- **多 Agent 流水线** — Planner → Researcher → Writer 三阶段协作
+
+### RAG 知识库
+- **混合检索** — FastEmbed + Qdrant + BM25 + BGE Reranker 三段式
+- **SHA1 去重入库** — 防重复 ingest；原地更新（内容变化自动删旧写新）
+- **热切换** — 运行时切换 Reranker 模型、开关混合检索，不重载向量库
+- **自动入库** — 文件监听器（可选），文档变更自动触发 ingest
+- **健康检查** — `/rag/health` 端点监控 collection 状态与 chunk 数
+
+### 可靠性 (P0)
+- **LLM 重试 + 熔断** — 分级重试（429/5xx/timeout）、指数退避+jitter、熔断器状态机
+- **连接池复用** — httpx Keep-Alive，消除重复 TCP/TLS 握手
+- **Python Docker 沙箱** — 可选容器隔离（network=none, read-only, 资源限制）
+- **Web 鉴权限流** — API Key 验证 + 固定窗口限流 + 标准速率头
+
+### 会话管理 (P1)
+- **SQLite WAL 模式** — 并发读不阻塞写
+- **批量提交** — 每 ReAct 步一次 commit（vs 逐条）
+- **分页加载** — 长会话按页加载，避免内存爆炸
+- **会话 TTL** — 自动清理过期会话
+- **历史压缩** — 超阈值自动 LLM 摘要 + 删除旧消息
+
+### 性能 (P2)
+- **工具并行化** — 无副作用工具 asyncio.gather 并行执行
+- **LLM 响应缓存** — TTL + LRU 精确匹配缓存（可选）
+
+### 可观测性 (P3)
+- **分布式追踪** — 轻量级 Span（LLM 调用 / 工具执行），结构化日志输出
+- **业务指标** — TTFT（首 token 延迟）、RAG 命中率、LLM 拒绝率
+- **Prometheus + Grafana** — 7 个 Counter + 4 个 Histogram + 预置看板
+
+### 安全
+- **计算器 AST 白名单** — 禁止函数调用/变量/属性访问
+- **文件工具沙箱** — `Path.relative_to` 严格判定路径越界
+- **Python 执行沙箱** — subprocess/docker 双模 + 超时 + 输出截断
 - **10 个内置工具** — RAG / 网搜 / 计算 / 时间 / 文件读写 / Python 执行
-- **安全沙箱** — 计算器 AST 白名单；文件工具 `Path.relative_to` 严格判定；Python 执行 subprocess + 超时
 
 ## CLI 命令
 
@@ -57,7 +88,10 @@ python main.py
 | `/hybrid on\|off` | 开关 BM25 + 向量混合检索 |
 | `/usage` | 显示累计 token / 成本 |
 | `/usage reset` | 重置计数 |
+| `/cache` | 显示缓存命中统计 |
+| `/cache clear` | 清空 LLM 缓存 |
 | `/team <task>` | 跑多 Agent 流水线 |
+| `/health` | RAG 知识库健康检查 |
 | `/help` | 命令帮助 |
 | `/quit` `/exit` | 退出 |
 | `Ctrl+C` | 强制退出 |
@@ -134,6 +168,12 @@ LLM_TEMPERATURE=0.0
 LLM_MAX_TOKENS=4096
 LLM_REQUEST_TIMEOUT=120
 
+# LLM 重试与熔断
+LLM_RETRY_MAX=3                                 # 最大重试次数
+LLM_RETRY_BACKOFF_BASE=1.0                      # 退避基数（秒）
+LLM_CIRCUIT_BREAKER_THRESHOLD=5                 # 熔断阈值
+LLM_CIRCUIT_BREAKER_COOLDOWN=30                 # 熔断冷却（秒）
+
 # DeepSeek thinking 模式（仅 V4 模型）
 LLM_THINKING_ENABLED=false
 LLM_REASONING_EFFORT=high
@@ -142,12 +182,24 @@ SHOW_REASONING=true
 # --- Agent ---
 AGENT_RECURSION_LIMIT=50
 AGENT_MAX_HISTORY_MESSAGES=80
+AGENT_SUMMARIZE_THRESHOLD=50                    # 触发摘要的消息数
+AGENT_SUMMARIZE_KEEP_RECENT=10                  # 摘要后保留最近 N 条
+AGENT_PARALLEL_TOOLS=true                       # 无副作用工具并行执行
+
+# --- LLM 缓存 ---
+CACHE_ENABLED=false
+CACHE_TTL_SECONDS=300
+CACHE_MAX_ENTRIES=1000
 
 # --- 会话 ---
 SESSION_DB_PATH=./sessions.db
+SESSION_WAL_ENABLED=true                        # WAL 模式
+SESSION_TTL_DAYS=30                             # 会话过期天数
 
 # --- 沙箱 ---
 WORKSPACE_DIR=./workspace
+SANDBOX_MODE=subprocess                         # subprocess|docker|disabled
+SANDBOX_DOCKER_IMAGE=infinite-logic-sandbox
 
 # --- RAG ---
 RAG_DOCS_DIR=./docs
@@ -159,6 +211,15 @@ RAG_TOP_K_RETRIEVAL=20
 RAG_TOP_K_RERANK=4
 RAG_RERANKER_ENABLED=true
 RAG_RERANKER_MODEL=BAAI/bge-reranker-base
+RAG_AUTO_INGEST=false                           # 文件监听自动入库
+
+# --- Web ---
+API_KEYS=                                       # 逗号分隔 API Key
+AUTH_ENABLED=true
+RATE_LIMIT_PER_MINUTE=20
+
+# --- 追踪 ---
+TRACING_ENABLED=true
 ```
 
 ### 切换厂商
@@ -220,11 +281,11 @@ InfiniteLogic/
 ├── ingest.py             # 文档入库 CLI
 ├── pyproject.toml        # 项目元数据 + 依赖声明 + 工具配置
 ├── uv.lock               # 锁定所有依赖精确版本（不可手动编辑）
-├── requirements.txt      # 已废弃 → 迁移至 pyproject.toml
-├── requirements-dev.txt  # 已废弃 → 迁移至 pyproject.toml
+├── Dockerfile.sandbox    # Python 执行沙箱镜像
 ├── README.md             # 快速开始与使用指南
 ├── WIKI.md               # 技术文档（架构/模块/扩展指南）
 ├── IMPROVEMENTS.md       # 25 项后续改进方向
+├── PRODUCTION_ROADMAP.md # 生产化路线图（P0-P4 优先级矩阵）
 ├── .env.example          # 配置模板
 ├── .gitignore
 ├── docs/                 # 待入库文档目录
@@ -234,14 +295,18 @@ InfiniteLogic/
 └── src/
     ├── config.py         # 配置（pydantic-settings）
     ├── llm.py            # httpx LLM 客户端（流式 SSE 解析 + usage 累计）
-    ├── session.py        # aiosqlite 会话存储
-    ├── agent.py          # ReAct 循环 + 历史裁剪
+    ├── llm_client.py     # LLM 客户端封装（重试+熔断+连接池+缓存）
+    ├── session.py        # aiosqlite 会话存储（WAL+分页+TTL+批量提交）
+    ├── agent.py          # ReAct 循环 + 历史裁剪 + 摘要压缩 + 工具并行
     ├── cli.py            # rich 终端 UI + slash 命令
     ├── multi_agent.py    # Planner / Researcher / Writer 流水线
-    ├── web.py            # FastAPI + SSE 单页前端
+    ├── web.py            # FastAPI + SSE 单页前端 + 鉴权
+    ├── auth.py           # API Key 验证 + 限流中间件
+    ├── cache.py          # LLM 响应缓存（TTL + LRU）
+    ├── tracing.py        # 分布式追踪（Span + contextvars）
     ├── usage.py          # token & cost 累计
     ├── logging_setup.py  # loguru 配置
-    ├── metrics.py        # Prometheus 计数器 / 直方图
+    ├── metrics.py        # Prometheus 计数器 / 直方图（含 TTFT/RAG/拒绝率）
     ├── rag/
     │   ├── document.py        # 最小 Document 模型
     │   ├── splitter.py        # 递归文本切分
@@ -249,17 +314,27 @@ InfiniteLogic/
     │   ├── vectorstore.py     # FastEmbed + Qdrant（embedded）原地删除
     │   ├── bm25_index.py      # BM25 索引（jieba 分词，支持 sha1 删除）
     │   ├── fusion.py          # RRF 多路融合
-    │   └── ingest_pipeline.py # SHA1 去重 + 原地更新
+    │   ├── reranker.py        # BGE CrossEncoder 精排（可热切换）
+    │   ├── ingest_pipeline.py # SHA1 去重 + 原地更新
+    │   ├── watcher.py         # 文件监听自动入库
+    │   └── health.py          # 向量库健康检查
     └── tools/
         ├── base.py            # @tool 装饰器 + 注册中心
         ├── calculator.py
         ├── datetime_tool.py
         ├── file_tools.py
         ├── python_exec.py     # run_python_file / exec_python_snippet
-        ├── rag_tool.py        # 混合检索 + 热切换接口
+        ├── sandbox.py         # Docker/subprocess 沙箱执行器
+        ├── rag_tool.py        # 混合检索 + 热切换接口（含监控指标）
         └── search.py
 
-tests/                    # pytest 单测
+tests/                    # pytest 62 个测试用例
+├── test_calculator.py    # AST 安全计算器（17 用例）
+├── test_file_tools.py    # 路径穿越攻击测试（10 用例）
+├── test_config.py        # 配置校验（7 用例）
+├── test_agent.py         # 历史裁剪边界（8 用例）
+├── test_llm.py           # SSE 解析 + Tool call 累积（8 用例）
+└── test_session.py       # 会话 CRUD + 分页 + TTL（8 用例）
 .github/workflows/ci.yml  # GitHub Actions
 web_server.py             # FastAPI Web UI 入口
 streamlit_app.py          # Streamlit UI 入口
@@ -292,9 +367,14 @@ streamlit_app.py          # Streamlit UI 入口
 |------|------|
 | 任意代码执行（calculator） | AST 白名单，禁止函数调用 / 变量 / 属性 |
 | 路径遍历（file tools） | `Path.relative_to` 严格判定，跨平台一致 |
-| Python 执行越界 | subprocess + workspace cwd + 30s/120s 超时 + 输出截断 |
-| API Key 泄露 | `.env` 已在 `.gitignore`，不会进版本控制 |
-| Agent 无限循环 | `AGENT_RECURSION_LIMIT=50` 兜底 |
-| 历史无限增长 | `_trim_history` 保留 system + 最近 N 条 |
+| Python 执行网络外连 | Docker 沙箱模式 `--network=none`（可选） |
+| Python 执行越界 | subprocess/docker 双模 + workspace 隔离 + 超时 + 输出截断 |
+| API Key 泄露 | `.env` 已在 `.gitignore`，永不进版本控制 |
+| Web 端点滥用 | API Key 鉴权 + 限流（429 + Retry-After） |
+| Agent 无限循环 | `AGENT_RECURSION_LIMIT=50` 兜底 + 熔断器自动切断 |
+| LLM 调用失败 | 分级重试（指数退避+jitter）+ 熔断器保护 |
+| 历史无限增长 | `_trim_history` 裁剪 + LLM 摘要压缩 + 会话 TTL |
+| 历史内存爆炸 | 分页加载 + 摘要压缩 + 旧消息 SQLite 删除 |
 | 工具异常崩溃 | `TOOLS.acall` 统一捕获异常转字符串 |
+| SQLite 写锁争用 | WAL 模式 + 批量提交 |
 | Qdrant 文件锁 | `reset_client()` 显式关闭后再删持久化目录 |
