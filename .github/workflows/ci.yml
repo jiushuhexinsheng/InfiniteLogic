@@ -1,4 +1,4 @@
-name: OpenBase CI
+name: InfiniteLogic CI
 
 on:
   push:
