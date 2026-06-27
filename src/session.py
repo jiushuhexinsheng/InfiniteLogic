@@ -104,23 +104,28 @@ class SessionStore:
         *,
         offset: int = 0,
         limit: int | None = None,
+        desc: bool = False,
     ) -> list[dict[str, Any]]:
         """
-        加载会话消息（支持分页）/ Load thread messages with optional pagination.
+        加载会话消息（支持分页与倒序）/ Load thread messages with optional pagination & direction.
 
         offset / limit 为 0 / None 时加载全部（向后兼容）。
         offset=0, limit=None loads all (backward compatible).
+
+        desc=True 时按 idx 降序（最新在前），适合分页拿最近 N 条场景。
+        desc=True returns newest-first; caller can reverse() to restore chronological order.
         """
+        direction = "DESC" if desc else "ASC"
         if limit:
             async with self._conn.execute(
-                "SELECT payload FROM messages WHERE thread_id = ? "
-                "ORDER BY idx ASC LIMIT ? OFFSET ?",
+                f"SELECT payload FROM messages WHERE thread_id = ? "
+                f"ORDER BY idx {direction} LIMIT ? OFFSET ?",
                 (thread_id, limit, offset),
             ) as cur:
                 rows = await cur.fetchall()
         else:
             async with self._conn.execute(
-                "SELECT payload FROM messages WHERE thread_id = ? ORDER BY idx ASC",
+                f"SELECT payload FROM messages WHERE thread_id = ? ORDER BY idx {direction}",
                 (thread_id,),
             ) as cur:
                 rows = await cur.fetchall()
@@ -140,28 +145,17 @@ class SessionStore:
 
         用于长会话中只加载最近的消息，避免内存爆炸。
         Use for long sessions to avoid loading all messages into memory.
+
+        直接用 DESC + OFFSET，不再额外 COUNT；空页自然返回 []。
+        Uses DESC + OFFSET directly — no extra COUNT query; empty pages naturally return [].
         """
         size = page_size or settings.session_message_page_size
-        # 先拿到该 thread 总消息数 / Get total count first.
-        async with self._conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
-            (thread_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            total = row[0] if row else 0
-
-        if total == 0:
-            return []
-
-        # 从后往前分页 / Paginate from the end.
-        # page=0 → 最后 size 条；page=1 → 倒数 size*2 到 size 条。
-        offset = max(0, total - (page + 1) * size)
-        limit = size
-        if page == 0:
-            # 最新页可能不足一页 / Last page may be partial.
-            limit = total - offset
-
-        return await self.load_messages(thread_id, offset=offset, limit=limit)
+        offset = page * size
+        messages = await self.load_messages(
+            thread_id, offset=offset, limit=size, desc=True,
+        )
+        messages.reverse()  # 恢复时间正序 / Restore chronological order.
+        return messages
 
     async def count_messages(self, thread_id: str) -> int:
         """获取会话消息总数 / Get message count for a thread."""

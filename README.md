@@ -17,6 +17,10 @@
 # 1. 创建虚拟环境并安装依赖
 uv sync
 
+# 或者用传统 pip 方式
+# uv pip install -r requirements.txt
+# python -m pip install -r requirements.txt
+
 # 2. 配置
 cp .env.example .env
 # 编辑 .env，填入 LLM_API_KEY
